@@ -89,8 +89,13 @@ class MongoDBClient {
   }
 
   // Quiz questions
-  async getQuizQuestions(categoryId: string) {
-    return this.request(`/quiz-questions/${categoryId}`);
+  async getQuizQuestions(categoryId: string, opts?: { count?: number; random?: boolean }) {
+    const params = new URLSearchParams();
+    if (opts?.count) params.set('count', String(opts.count));
+    if (opts?.random) params.set('random', 'true');
+    const query = params.toString();
+    const suffix = query ? `?${query}` : '';
+    return this.request(`/quiz-questions/${categoryId}${suffix}`);
   }
 
   // Quiz attempts

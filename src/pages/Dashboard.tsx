@@ -21,6 +21,16 @@ const Dashboard = () => {
   const { user, loading } = useAuth();
   const navigate = useNavigate();
 
+  // Always call hooks in the same order; guard the query via `enabled`
+  const { data: quizStats } = useQuery({
+    queryKey: ['quiz-stats', user?.id],
+    queryFn: async () => {
+      if (!user) return null;
+      return await mongodbClient.getQuizStats();
+    },
+    enabled: !!user && !loading,
+  });
+
   // Redirect to auth if not logged in
   useEffect(() => {
     if (!loading && !user) {
@@ -39,15 +49,6 @@ const Dashboard = () => {
   if (!user) {
     return null; // Will redirect to auth
   }
-
-  const { data: quizStats } = useQuery({
-    queryKey: ['quiz-stats', user?.id],
-    queryFn: async () => {
-      if (!user) return null;
-      return await mongodbClient.getQuizStats();
-    },
-    enabled: !!user,
-  });
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-black to-gray-900 p-4">

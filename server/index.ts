@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import jwt from 'jsonwebtoken';
+import mongoose from 'mongoose';
 import { connectDB } from '../src/integrations/mongodb/connection';
 import { User, QuizCategory, QuizQuestion, QuizAttempt, AIAnalysisResult } from '../src/integrations/mongodb/models';
 
@@ -17,6 +18,27 @@ app.use(express.json());
 
 // Connect to MongoDB
 connectDB();
+
+// Health endpoint to verify DB target
+app.get('/api/health', async (_req, res) => {
+  try {
+    const state = mongoose.connection.readyState; // 1 connected, 2 connecting
+    const host = mongoose.connection.host;
+    const name = mongoose.connection.name;
+    const usingEnv = !!process.env.MONGODB_URI;
+    res.json({
+      status: 'ok',
+      db: {
+        connected: state === 1,
+        host,
+        name,
+        viaEnv: usingEnv,
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ status: 'error' });
+  }
+});
 
 // Authentication middleware
 const authenticateToken = (req: any, res: any, next: any) => {
@@ -125,13 +147,26 @@ app.get('/api/quiz-categories', async (req, res) => {
 app.get('/api/quiz-questions/:categoryId', async (req, res) => {
   try {
     const { categoryId } = req.params;
+    const countParam = Array.isArray(req.query.count) ? req.query.count[0] : req.query.count;
+    const randomParam = Array.isArray(req.query.random) ? req.query.random[0] : req.query.random;
+    const count = Math.max(1, Math.min(100, parseInt(String(countParam || '10'), 10)));
+    const random = String(randomParam || 'false') === 'true';
     
     if (!categoryId || categoryId === 'undefined') {
       return res.json([]);
     }
     
-    const questions = await QuizQuestion.find({ categoryId }).limit(10);
-    res.json(questions);
+    if (random) {
+      const matchCategoryId = new mongoose.Types.ObjectId(categoryId);
+      const questions = await QuizQuestion.aggregate([
+        { $match: { categoryId: matchCategoryId } },
+        { $sample: { size: count } },
+      ]);
+      return res.json(questions);
+    } else {
+      const questions = await QuizQuestion.find({ categoryId }).limit(count);
+      return res.json(questions);
+    }
   } catch (error) {
     console.error('Get questions error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -142,7 +177,7 @@ app.get('/api/quiz-questions/:categoryId', async (req, res) => {
 app.post('/api/quiz-attempts', authenticateToken, async (req, res) => {
   try {
     const { categoryId, score, totalQuestions, answers, timeTaken } = req.body;
-    const userId = req.user.userId;
+    const userId = (req as any).user.userId;
 
     const quizAttempt = new QuizAttempt({
       userId,
@@ -165,15 +200,26 @@ app.post('/api/quiz-attempts', authenticateToken, async (req, res) => {
 
 app.get('/api/quiz-attempts', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = (req as any).user.userId;
     const attempts = await QuizAttempt.find({ userId })
       .populate('categoryId', 'name color')
       .populate('answers.questionId', 'question options correctAnswer explanation')
       .sort({ completedAt: -1 });
 
-    // Transform the data to match frontend expectations
-    const transformedAttempts = attempts.map(attempt => {
+    const transformedAttempts = await Promise.all(attempts.map(async (attempt) => {
       const category = attempt.categoryId as any;
+      const analysisDoc = await AIAnalysisResult.findOne({
+        userId,
+        quizAttemptId: attempt._id,
+      }).sort({ createdAt: -1 });
+
+      const analysis = analysisDoc ? {
+        overall_feedback: analysisDoc.overallFeedback,
+        weak_areas: analysisDoc.weakAreas,
+        study_recommendations: analysisDoc.studyRecommendations,
+        next_steps: analysisDoc.nextSteps,
+      } : null;
+
       return {
         id: attempt._id,
         score: attempt.score,
@@ -184,9 +230,9 @@ app.get('/api/quiz-attempts', authenticateToken, async (req, res) => {
           name: category?.name || 'Unknown Category',
           color: category?.color || '#6b7280'
         },
-        analysis: null // We'll implement this later
+        analysis,
       };
-    });
+    }));
 
     res.json(transformedAttempts);
   } catch (error) {
@@ -198,29 +244,35 @@ app.get('/api/quiz-attempts', authenticateToken, async (req, res) => {
 // Quiz stats route
 app.get('/api/quiz-stats', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = (req as any).user.userId;
     const attempts = await QuizAttempt.find({ userId });
 
     if (attempts.length === 0) {
       return res.json({
-        totalAttempts: 0,
-        averageScore: 0,
-        bestScore: 0,
-        totalTimeSpent: 0,
+        total_attempts: 0,
+        average_score: 0,
+        best_score: 0,
+        total_time_spent: 0,
       });
     }
 
     const totalAttempts = attempts.length;
     const totalScore = attempts.reduce((sum, attempt) => sum + attempt.score, 0);
-    const averageScore = totalScore / totalAttempts;
-    const bestScore = Math.max(...attempts.map(attempt => attempt.score));
+    const totalQuestions = attempts.reduce((sum, attempt) => sum + (attempt.totalQuestions || 0), 0);
+    const averagePercentage = totalQuestions > 0 ? (totalScore / totalQuestions) * 100 : 0;
+    const bestPercentage = Math.max(
+      ...attempts.map(attempt => {
+        const tq = attempt.totalQuestions || 0;
+        return tq > 0 ? (attempt.score / tq) * 100 : 0;
+      })
+    );
     const totalTimeSpent = attempts.reduce((sum, attempt) => sum + (attempt.timeTaken || 0), 0);
 
     res.json({
-      totalAttempts,
-      averageScore,
-      bestScore,
-      totalTimeSpent,
+      total_attempts: totalAttempts,
+      average_score: Math.round(averagePercentage),
+      best_score: Math.round(bestPercentage),
+      total_time_spent: totalTimeSpent,
     });
   } catch (error) {
     console.error('Get quiz stats error:', error);
@@ -232,7 +284,7 @@ app.get('/api/quiz-stats', authenticateToken, async (req, res) => {
 app.post('/api/ai-analysis', authenticateToken, async (req, res) => {
   try {
     const { quizAttemptId, overallFeedback, weakAreas, studyRecommendations, nextSteps } = req.body;
-    const userId = req.user.userId;
+    const userId = (req as any).user.userId;
 
     const analysis = new AIAnalysisResult({
       userId,

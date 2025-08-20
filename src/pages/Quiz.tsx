@@ -89,7 +89,8 @@ const Quiz = () => {
   const { data: regularQuestions = [], isLoading: questionsLoading } = useQuery({
     queryKey: ['quiz-questions', categoryId],
     queryFn: async () => {
-      return await mongodbClient.getQuizQuestions(categoryId);
+      // Fetch more questions and randomize
+      return await mongodbClient.getQuizQuestions(categoryId as string, { count: 20, random: true });
     },
     enabled: !!categoryId && categoryId !== 'ai-generated',
   });
@@ -191,11 +192,60 @@ const Quiz = () => {
         if (percentage < 80) {
           setAnalysisLoading(true);
           try {
-            // For now, we'll skip AI analysis as it requires additional setup
-            // You can implement this later by adding an AI analysis endpoint
-            console.log('AI analysis would be generated here');
+            // Build simple weak areas from incorrect answers (top 3)
+            const incorrect = questions
+              .map((q, i) => ({ question: q, index: i, correct: finalAnswers[i] === q.correctAnswer }))
+              .filter(x => !x.correct)
+              .slice(0, 3);
+
+            const weakAreaTopics = incorrect.map(x => x.question.question);
+
+            // Persist minimal analysis for history
+            await mongodbClient.createAIAnalysis({
+              quizAttemptId: (quizAttempt as any)._id,
+              overallFeedback: `You scored ${score}/${totalQuestions} (${Math.round(percentage)}%). Focus on the missed topics below.`,
+              weakAreas: weakAreaTopics,
+              studyRecommendations: [
+                'Review explanations for incorrect answers',
+                'Revisit notes for this category',
+                'Practice 5–10 more questions in this topic'
+              ],
+              nextSteps: [
+                'Retake the quiz after review',
+                'Aim for at least 80% on the next attempt'
+              ]
+            });
+
+            // Prepare richer client-side analysis object for immediate display
+            const localWeakAreas = incorrect.map((x, idx) => ({
+              topic: x.question.question,
+              description: x.question.explanation || 'Review this concept and try a few practice questions.',
+              priority: idx === 0 ? 'high' : idx === 1 ? 'medium' : 'low'
+            }));
+
+            const localStudyRecommendations = [
+              {
+                topic: category?.name || 'This category',
+                tips: [
+                  'Re-read each explanation for your incorrect answers',
+                  'Summarize the core concept in your own words',
+                  'Do 5–10 spaced-repetition practice questions'
+                ],
+                resources: []
+              }
+            ];
+
+            setAiAnalysis({
+              overallFeedback: `You scored ${score}/${totalQuestions} (${Math.round(percentage)}%). Focus on the missed topics below.`,
+              weakAreas: localWeakAreas,
+              studyRecommendations: localStudyRecommendations,
+              nextSteps: [
+                'Retake the quiz after review',
+                'Aim for at least 80% on the next attempt'
+              ]
+            });
           } catch (error) {
-            console.error('Error getting AI analysis:', error);
+            console.error('Error creating AI analysis:', error);
           } finally {
             setAnalysisLoading(false);
           }
